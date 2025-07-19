@@ -1,0 +1,6 @@
+prometheus_client
+python-dotenv
+web3
+docker
+websockets
+setuptools<81

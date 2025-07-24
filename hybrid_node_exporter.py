@@ -19,7 +19,7 @@ OPERATOR_ADDRESS = os.getenv("OPERATOR_ADDRESS")
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 METRIC_UPDATE_TIMEOUT_SECONDS = int(os.getenv("METRIC_UPDATE_TIMEOUT_SECONDS", 60))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-RECONNECT_TIMEOUT = os.getenv("RECONNECT_TIMEOUT", 5).upper()
+RECONNECT_TIMEOUT = os.getenv("RECONNECT_TIMEOUT", 5)
 
 # Setup logging
 log_format = "%(asctime)s - %(levelname)s - %(message)s"

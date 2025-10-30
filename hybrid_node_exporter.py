@@ -44,7 +44,7 @@ heartbeat_metric = Gauge(
     "hybrid_heartbeat", "Epoch timestamp of last heartbeat transaction", ["op_add"]
 )
 rpc_request_status_metric = Counter(
-    "rpc_request_status", "RPC request status", ["op_add", "endpoint", "status"]
+    "rpc_request_status", "RPC request status", ["endpoint", "status"]
 )
 
 # --- Metric Definitions ---
@@ -56,10 +56,12 @@ operator_state = {
     #     'uptime_seconds': 0,
     #     'container_id': None,
     #     'heartbeat_timestamp': 0,
-    #     'rpc_success': 0,
-    #     'rpc_fail': 0
     # }
 }
+
+# Global RPC counters (shared across all operators)
+rpc_success_count = 0
+rpc_fail_count = 0
 
 # Initialize state for each operator address
 for op_addr in OPERATOR_ADDRESSES:
@@ -67,9 +69,16 @@ for op_addr in OPERATOR_ADDRESSES:
         'uptime_seconds': 0,
         'container_id': None,
         'heartbeat_timestamp': 0,
-        'rpc_success': 0,
-        'rpc_fail': 0
     }
+
+# Initialize RPC metrics with 0 values to ensure they appear in Prometheus
+# This creates the metric time series even before any RPC calls are made
+if WS_ENDPOINT:
+    rpc_request_status_metric.labels(endpoint=WS_ENDPOINT, status="success")
+    rpc_request_status_metric.labels(endpoint=WS_ENDPOINT, status="fail")
+if RPC_ENDPOINT:
+    rpc_request_status_metric.labels(endpoint=RPC_ENDPOINT, status="success")
+    rpc_request_status_metric.labels(endpoint=RPC_ENDPOINT, status="fail")
 
 # --- Helper Functions ---
 
@@ -155,22 +164,24 @@ def update_metrics():
         # Log status for this operator
         logging.info(
             f"[{op_addr}] uptime: {current_uptime}s, "
-            f"heartbeat: {heartbeat_timestamp}, "
-            f"rpc success: {operator_state[op_addr]['rpc_success']}, "
-            f"rpc fail: {operator_state[op_addr]['rpc_fail']}"
+            f"heartbeat: {heartbeat_timestamp}"
         )
 
+    # Log global RPC stats
+    logging.info(f"Global RPC stats - success: {rpc_success_count}, fail: {rpc_fail_count}")
     logging.info("Metric update cycle finished.")
 
 
-async def _listen_for_heartbeats(operator_address):
+async def _listen_for_heartbeats():
     """
     Listens for new blocks via WebSocket, fetches full block data,
-    filters for heartbeat transactions from operator_address,
-    and updates operator-specific heartbeat timestamp and RPC status counters.
+    filters for heartbeat transactions from ALL operator addresses,
+    and updates operator-specific heartbeat timestamps and global RPC status counters.
     """
+    global rpc_success_count, rpc_fail_count
+    
     logging.info(
-        f"Listening for heartbeat transactions from operator {operator_address}"
+        f"Listening for heartbeat transactions from operators: {', '.join(OPERATOR_ADDRESSES)}"
     )
 
     web3_http = Web3(HTTPProvider(RPC_ENDPOINT))
@@ -187,59 +198,58 @@ async def _listen_for_heartbeats(operator_address):
                 try:
                     await ws.send(json.dumps(subscribe_msg))
                     rpc_request_status_metric.labels(
-                        op_add=operator_address, endpoint=WS_ENDPOINT, status="success"
+                        endpoint=WS_ENDPOINT, status="success"
                     ).inc()
-                    operator_state[operator_address]['rpc_success'] += 1
+                    rpc_success_count += 1
                 except Exception as e:
                     rpc_request_status_metric.labels(
-                        op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                        endpoint=WS_ENDPOINT, status="fail"
                     ).inc()
-                    logging.error(f"[{operator_address}] WS subscribe failed: {e}")
-                    operator_state[operator_address]['rpc_fail'] += 1
+                    logging.error(f"WS subscribe failed: {e}")
+                    rpc_fail_count += 1
                     return
                 try:
                     resp = await ws.recv()
                     rpc_request_status_metric.labels(
-                        op_add=operator_address, endpoint=WS_ENDPOINT, status="success"
+                        endpoint=WS_ENDPOINT, status="success"
                     ).inc()
-                    operator_state[operator_address]['rpc_success'] += 1
+                    rpc_success_count += 1
                 except Exception as e:
                     rpc_request_status_metric.labels(
-                        op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                        endpoint=WS_ENDPOINT, status="fail"
                     ).inc()
-                    logging.error(f"[{operator_address}] WS subscribe confirmation failed: {e}")
-                    operator_state[operator_address]['rpc_fail'] += 1
+                    logging.error(f"WS subscribe confirmation failed: {e}")
+                    rpc_fail_count += 1
                     return
                 msg = json.loads(resp)
                 sub_id = msg.get("result")
                 if not sub_id:
-                    logging.error(f"[{operator_address}] Subscription failed: {msg}")
+                    logging.error(f"Subscription failed: {msg}")
                     logging.info(
-                        f"[{operator_address}] Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds..."
+                        f"Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds..."
                     )
                     rpc_request_status_metric.labels(
-                        op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                        endpoint=WS_ENDPOINT, status="fail"
                     ).inc()
-                    operator_state[operator_address]['rpc_fail'] += 1
+                    rpc_fail_count += 1
                     await asyncio.sleep(RECONNECT_TIMEOUT)
                     continue
-                logging.info(f"[{operator_address}] Subscribed to newHeads with subscription id {sub_id}")
+                logging.info(f"Subscribed to newHeads with subscription id {sub_id}")
                 # Listen for new block headers
                 while True:
                     try:
                         data = await ws.recv()
                         rpc_request_status_metric.labels(
-                            op_add=operator_address,
                             endpoint=WS_ENDPOINT,
                             status="success",
                         ).inc()
-                        operator_state[operator_address]['rpc_success'] += 1
+                        rpc_success_count += 1
                     except Exception as e:
                         rpc_request_status_metric.labels(
-                            op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                            endpoint=WS_ENDPOINT, status="fail"
                         ).inc()
-                        operator_state[operator_address]['rpc_fail'] += 1
-                        logging.error(f"[{operator_address}] WS recv failed: {e}")
+                        rpc_fail_count += 1
+                        logging.error(f"WS recv failed: {e}")
                         break
                     msg = json.loads(data)
                     params = msg.get("params")
@@ -255,20 +265,18 @@ async def _listen_for_heartbeats(operator_address):
                             )
                             # Instrument HTTP block fetch success
                             rpc_request_status_metric.labels(
-                                op_add=operator_address,
                                 endpoint=RPC_ENDPOINT,
                                 status="success",
                             ).inc()
-                            operator_state[operator_address]['rpc_success'] += 1
+                            rpc_success_count += 1
                         except Exception as e:
                             # Instrument HTTP block fetch failure
                             rpc_request_status_metric.labels(
-                                op_add=operator_address,
                                 endpoint=RPC_ENDPOINT,
                                 status="fail",
                             ).inc()
-                            operator_state[operator_address]['rpc_fail'] += 1
-                            logging.error(f"[{operator_address}] Failed to fetch block {block_hash}: {e}")
+                            rpc_fail_count += 1
+                            logging.error(f"Failed to fetch block {block_hash}: {e}")
                             continue
                         # Extract timestamp directly
                         timestamp = (
@@ -278,9 +286,9 @@ async def _listen_for_heartbeats(operator_address):
                         )
 
                         logging.debug(
-                            f"Checking block {block.number if hasattr(block, 'number') else int(block['number'], 16)} with hash {block_hash} for {len(block.transactions)} transaction(s) from {operator_address}..."
+                            f"Checking block {block.number if hasattr(block, 'number') else int(block['number'], 16)} with hash {block_hash} for {len(block.transactions)} transaction(s)..."
                         )
-                        # Check each transaction
+                        # Check each transaction against ALL operator addresses
                         for tx in block.transactions:
                             # Normalize sender and input fields
                             tx_from = getattr(tx, "from", None) or getattr(
@@ -291,42 +299,35 @@ async def _listen_for_heartbeats(operator_address):
                             if isinstance(tx_input, (bytes, bytearray)):
                                 tx_input = "0x" + tx_input.hex()
                             # Check for matching heartbeat signature
-                            if str(
-                                tx_from
-                            ).lower() == operator_address.lower() and tx_input.startswith(
-                                "0x3defb962"
-                            ):
-                                operator_state[operator_address]['heartbeat_timestamp'] = timestamp
-                                # Update Prometheus metrics
-                                heartbeat_metric.labels(op_add=operator_address).set(
-                                    timestamp
-                                )
-                                rpc_request_status_metric.labels(
-                                    op_add=operator_address,
-                                    endpoint=RPC_ENDPOINT,
-                                    status="success",
-                                ).inc()
-                                operator_state[operator_address]['rpc_success'] += 1
-                                logging.info(
-                                    f"[{operator_address}] Heartbeat tx found in block {block_hash}, timestamp {timestamp}"
-                                )
-                                break
+                            if tx_input.startswith("0x3defb962"):
+                                # Check if transaction is from any of our operator addresses
+                                for operator_address in OPERATOR_ADDRESSES:
+                                    if str(tx_from).lower() == operator_address.lower():
+                                        operator_state[operator_address]['heartbeat_timestamp'] = timestamp
+                                        # Update Prometheus metrics
+                                        heartbeat_metric.labels(op_add=operator_address).set(
+                                            timestamp
+                                        )
+                                        logging.info(
+                                            f"[{operator_address}] Heartbeat tx found in block {block_hash}, timestamp {timestamp}"
+                                        )
+                                        break
         except websockets.exceptions.ConnectionClosed as cc:
-            logging.error(f"[{operator_address}] WebSocket connection closed: {cc}")
+            logging.error(f"WebSocket connection closed: {cc}")
             rpc_request_status_metric.labels(
-                op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                endpoint=WS_ENDPOINT, status="fail"
             ).inc()
-            operator_state[operator_address]['rpc_fail'] += 1
+            rpc_fail_count += 1
             await asyncio.sleep(RECONNECT_TIMEOUT)
-            logging.info(f"[{operator_address}] Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds...")
+            logging.info(f"Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds...")
         except Exception as e:
-            logging.error(f"[{operator_address}] Unexpected error in heartbeat listener: {e}")
+            logging.error(f"Unexpected error in heartbeat listener: {e}")
             rpc_request_status_metric.labels(
-                op_add=operator_address, endpoint=WS_ENDPOINT, status="fail"
+                endpoint=WS_ENDPOINT, status="fail"
             ).inc()
-            operator_state[operator_address]['rpc_fail'] += 1
+            rpc_fail_count += 1
             await asyncio.sleep(RECONNECT_TIMEOUT)
-            logging.info(f"[{operator_address}] Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds...")
+            logging.info(f"Reconnecting to WebSocket in {RECONNECT_TIMEOUT} seconds...")
 
 
 # --- Main Execution ---
@@ -358,9 +359,8 @@ async def main_async():
             or RPC_ENDPOINT.startswith("https://")
         )
     ):
-        # Start heartbeat listener task for each operator address
-        for op_addr in OPERATOR_ADDRESSES:
-            asyncio.create_task(_listen_for_heartbeats(op_addr))
+        # Start single heartbeat listener task for all operator addresses
+        asyncio.create_task(_listen_for_heartbeats())
     else:
         logging.warning(
             "WS_ENDPOINT is not a websocket URL or RPC_ENDPOINT is/are not a valid URL. \

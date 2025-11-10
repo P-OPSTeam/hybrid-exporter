@@ -12,7 +12,7 @@ Set the following environment variables (see `.env.example`):
 
 - `WS_ENDPOINT`: WebSocket endpoint for block header subscription
 - `RPC_ENDPOINT`: HTTP RPC endpoint for block/tx queries
-- `OPERATOR_ADDRESS`: EVM address to monitor
+- `OPERATOR_ADDRESSES`: EVM addresses to monitor (comma-separated)
 - `METRIC_UPDATE_TIMEOUT_SECONDS`: Metric update interval (seconds)
 - `METRICS_PORT`: Port for Prometheus metrics (default: 8000)
 - `LOG_LEVEL`: Logging verbosity (default: INFO)
